@@ -65,10 +65,19 @@ namespace {
     Tracking::~Tracking()
     {
         tracking_enabled = false;
-        if (!scope_map_.empty()) {
+        bool empty = true;
+        for(auto& pair : scope_map_) {
+            if (pair.second != 0) {
+                empty = false;
+                break;
+            }
+        }
+        if (!empty) {
             std::cout << "Unfreed memory:\n";
             for(auto& pair : scope_map_) {
-                std::cout << "  " << pair.first << " - " << pair.second << "\n";
+                if (pair.second != 0) {
+                    std::cout << "  " << pair.first << " - " << pair.second << "\n";
+                }
             }
         }
     }
@@ -83,7 +92,7 @@ namespace {
         } else {
             auto iter = scope_map_.find(scope);
             if (iter == scope_map_.end()) {
-                scope_map_.emplace(std::make_pair(scope,0));
+                scope_map_.emplace(std::make_pair(scope,size));
             } else {
                 iter->second += size;
             }

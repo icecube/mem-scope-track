@@ -53,3 +53,5 @@ function(make_test NAME)
 endfunction(make_test)
 
 make_test(test_01)
+make_test(test_02)
+make_test(test_03)
