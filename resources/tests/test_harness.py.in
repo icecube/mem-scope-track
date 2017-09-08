@@ -1,0 +1,25 @@
+#!/usr/bin/env python
+
+import os
+import sys
+import subprocess
+import importlib
+
+name = sys.argv[1]
+build_dir = "${CMAKE_BINARY_DIR}"
+
+tracking_path = os.path.join(build_dir,'libmemscopetrack.so')
+os.environ['LD_PRELOAD'] = tracking_path
+
+sys.path.append(os.path.join(build_dir,'tests'))
+
+path = os.path.join(build_dir,'tests',name)
+if os.path.exists(path+'.py'):
+    # there exists an output verification script
+    m = importlib.import_module(name)
+    out = subprocess.check_output(path, stderr=subprocess.STDOUT)
+    print(out)
+    print('running verify')
+    m.verify(out)
+else:
+    subprocess.check_call(path)

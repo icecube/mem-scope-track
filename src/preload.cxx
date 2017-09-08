@@ -4,15 +4,9 @@
 #include <cstring>
 #include <dlfcn.h>
 
-// the public parts of the library
+#include "track.h"
 
-namespace memory {
-    std::string scope;
-    void set_scope(std::string s) {
-        scope = s;
-    }
-}
-
+// keep track of original functions we are overloading
 namespace overloads {
     template <typename Signature, typename T>
     struct base
@@ -58,11 +52,13 @@ namespace overloads {
         overloads::malloc.init();
         overloads::free.init();
         overloads::calloc.init();
-        
+
+        // unset to prevent measuring subprocesses
         unsetenv("LD_PRELOAD");
     }
-}
+} // end namespace overloads
 
+// the actual overloads happen here, in C to be fully compliant
 extern "C" {
     void* malloc(size_t size) noexcept
     {
@@ -71,7 +67,9 @@ extern "C" {
         }
 
         void* ptr = overloads::malloc(size);
-        fprintf(stderr, "malloc: %ux, %ul\n", ptr, size);
+
+        memory::track(ptr,size);
+
         return ptr;
     }
 
@@ -81,7 +79,7 @@ extern "C" {
             overloads::init();
         }
 
-        fprintf(stderr, "free: %ux\n", ptr);
+        memory::release(ptr);
 
         overloads::free(ptr);
     }
@@ -92,12 +90,12 @@ extern "C" {
             overloads::init();
         }
 
-        void* ret = overloads::calloc(num, size);
+        void* ptr = overloads::calloc(num, size);
 
-        if (ret) {
-            fprintf(stderr, "calloc: %ux, %ul, %ul\n", ret, num, size);
+        if (ptr) {
+            memory::track(ptr,num*size);
         }
 
-        return ret;
+        return ptr;
     }
 } // end extern C
