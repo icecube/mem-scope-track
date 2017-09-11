@@ -47,8 +47,33 @@ namespace overloads {
         static constexpr const char* identifier = "calloc";
     } calloc;
 
+    /**
+     * Dummy implementation for calloc, to get bootstrapped.
+     * This is only called at startup and will eventually be replaced by the
+     * "proper" calloc implementation.
+     */
+    void* dummy_calloc(size_t num, size_t size) noexcept
+    {
+        const size_t MAX_SIZE = 1024;
+        static char* buf[MAX_SIZE];
+        static size_t offset = 0;
+        if (!offset) {
+            memset(buf, 0, MAX_SIZE);
+        }
+        size_t oldOffset = offset;
+        offset += num * size;
+        if (offset >= MAX_SIZE) {
+            fprintf(stderr, "failed to initialize, dummy calloc buf size exhausted: "
+                            "%zu requested, %zu available\n",
+                    offset, MAX_SIZE);
+            abort();
+        }
+        return buf + oldOffset;
+    }
+
     void init()
     {
+        overloads::calloc.original = &dummy_calloc;
         overloads::malloc.init();
         overloads::free.init();
         overloads::calloc.init();

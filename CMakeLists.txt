@@ -1,12 +1,18 @@
 cmake_minimum_required(VERSION 3.9)
 
+find_package(Boost 1.51 REQUIRED COMPONENTS
+             iostreams)
+
 include_directories(include)
 
 add_library(memscopetrack SHARED
     src/preload.cxx
     src/track.cxx
 )
-target_link_libraries(memscopetrack dl)
+target_link_libraries(memscopetrack
+    dl
+    Boost::iostreams
+)
 target_compile_features(memscopetrack
     PRIVATE
         cxx_std_14
