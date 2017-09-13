@@ -78,6 +78,8 @@ namespace overloads {
         overloads::free.init();
         overloads::calloc.init();
 
+        memory::init();
+
         // unset to prevent measuring subprocesses
         unsetenv("LD_PRELOAD");
     }

@@ -10,9 +10,11 @@
 #include <thread>
 #include <condition_variable>
 #include <chrono>
+#include <random>
 
 #include <boost/iostreams/filtering_streambuf.hpp>
 #include <boost/iostreams/filter/gzip.hpp>
+#include <boost/filesystem.hpp>
 
 #include "track.h"
 
@@ -20,11 +22,12 @@ namespace {
 
     class Tracking;
 
-    // get a randomly named output file in the current directory
+    // create an output file
     class Outfile
     {
     public:
-        Outfile();
+        Outfile() = delete;
+        Outfile(std::string);
         ~Outfile() = default;
 
         // non-copyable, movable
@@ -42,6 +45,19 @@ namespace {
         std::unique_ptr<std::ofstream> outfile_base_;
         std::unique_ptr<boost::iostreams::filtering_ostreambuf> out_filter_;
         std::unique_ptr<std::ostream> outfile_stream_;
+    };
+
+
+    // get a randomly named output file in the current directory
+    class RandomOutfile : public Outfile
+    {
+    public:
+        RandomOutfile();
+        ~RandomOutfile() = default;
+
+        // non-copyable, movable
+        RandomOutfile(const RandomOutfile&) = delete;
+        RandomOutfile(RandomOutfile&&) = default;
     };
 
 
@@ -100,6 +116,9 @@ namespace {
         Tracking& operator=(const Tracking&) = delete;
         Tracking& operator=(Tracking&&) = delete;
 
+        // external initialization
+        void init();
+
         // start tracking to file
         void start();
 
@@ -115,7 +134,12 @@ namespace {
         // get current scope map as a copy
         std::unordered_map<std::string, size_t> get_extents() const;
 
+        // get library path
+        inline std::string get_library_path() const
+        { return library_path_; }
+
     private:
+        std::string library_path_;
         std::unordered_map<std::string, size_t> scope_map_;
         std::unordered_map<void*, std::pair<std::string, size_t>> ptr_map_;
         mutable std::mutex thread_guard_;
@@ -125,9 +149,32 @@ namespace {
 
 
     /** Implementation **/
-    
-    Outfile::Outfile()
-        : filename_("mem-scope-track.")
+
+    Outfile::Outfile(std::string path)
+        : filename_(path)
+    {
+        auto has_suffix = [&](const std::string &suffix)
+        {
+            return filename_.size() >= suffix.size() &&
+                   filename_.compare(filename_.size() - suffix.size(), suffix.size(), suffix) == 0;
+        };
+        outfile_base_ = std::make_unique<std::ofstream>(filename_, std::ios::out | std::ios::binary);
+        if (!outfile_base_) {
+            throw std::runtime_error("cannot open output file");
+        }
+        if (has_suffix(".gz")) {
+            // gzip the file
+            out_filter_ = std::make_unique<boost::iostreams::filtering_ostreambuf>();
+            out_filter_->push(boost::iostreams::gzip_compressor());
+            out_filter_->push(*outfile_base_);
+            outfile_stream_ = std::make_unique<std::ostream>(out_filter_.get());
+        } else {
+            // plain file
+            outfile_stream_ = std::move(outfile_base_);
+        }
+    }
+
+    std::string randstr(unsigned length)
     {
         auto randchar = []() -> char
         {
@@ -135,23 +182,22 @@ namespace {
             "0123456789"
             "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
             "abcdefghijklmnopqrstuvwxyz";
-            const size_t max_index = (sizeof(charset) - 1);
-            return charset[ rand() % max_index ];
+            const size_t max_index = (sizeof(charset) - 2);
+            std::mt19937 rng (std::random_device{}());
+            std::uniform_int_distribution<> dist (0, max_index);
+            return charset[ dist(rng) ];
         };
-        ;
-        for(unsigned i=0;i<10;i++) {
-            filename_.push_back(randchar());
+
+        std::string ret;
+        for(unsigned i=0;i<length;i++) {
+            ret.push_back(randchar());
         }
-        filename_.append(".gz");
-        outfile_base_ = std::make_unique<std::ofstream>(filename_, std::ios::out | std::ios::binary);
-        if (!outfile_base_) {
-            throw std::runtime_error("cannot open memory statistics output file");
-        }
-        out_filter_ = std::make_unique<boost::iostreams::filtering_ostreambuf>();
-        out_filter_->push(boost::iostreams::gzip_compressor());
-        out_filter_->push(*outfile_base_);
-        outfile_stream_ = std::make_unique<std::ostream>(out_filter_.get());
+        return ret;
     }
+
+    RandomOutfile::RandomOutfile()
+        : Outfile("mem-scope-track."+randstr(10)+".gz")
+    { }
 
     template<typename T>
     std::ostream&
@@ -177,41 +223,48 @@ namespace {
 
     void TrackingThread::run()
     {
-        std::string graph_cmd("python timeline.py ");
+        RecursionGuard r;
+        boost::filesystem::path p(tracking_.get_library_path());
+        p += "timeline.py";
+        std::string graph_cmd = "python " + p.string();
         {
             using namespace std::chrono_literals;
             auto start = std::chrono::high_resolution_clock::now();
             std::unique_lock<std::mutex> lock(tracking_thread_cv_mutex_);
-            Outfile outfile = Outfile();
-            graph_cmd += outfile.get_filename();
-            
+
+            std::unique_ptr<Outfile> outfile;
+            char* outfile_name = std::getenv("MEMSCOPETRACK_OUTFILE");
+            if (outfile_name == nullptr) {
+                outfile = std::make_unique<RandomOutfile>();
+            } else {
+                outfile = std::make_unique<Outfile>(outfile_name);
+            }
+            graph_cmd += outfile->get_filename();
+
             auto print = [&](){
                 auto extents = tracking_.get_extents();
                 auto now = std::chrono::high_resolution_clock::now();
-                outfile << "---" << std::chrono::duration_cast<std::chrono::microseconds>(now-start).count() << "\n";
+                *outfile << "---" << std::chrono::duration_cast<std::chrono::microseconds>(now-start).count() << "\n";
                 for(auto& pair: extents) {
-                    outfile << pair.first << "|" << pair.second << "\n";
+                    *outfile << pair.first << "|" << pair.second << "\n";
                 }
             };
             print();
 
             while(running_) {
-                tracking_thread_cv_.wait_for(lock, 100ms, [&](){return running_==true;});
+                tracking_thread_cv_.wait_for(lock, 100ms, [&](){return running_==false;});
                 print();
             }
         }
 
         // call into python to make graph
-        std::cout << graph_cmd;
+        std::cout << graph_cmd << "\n";
         //system(graph_cmd);
     }
     
 
     Tracking::Tracking()
-    {
-        tracking_enabled = true;
-        start();
-    }
+    { }
 
     Tracking::~Tracking()
     {
@@ -232,6 +285,21 @@ namespace {
                 }
             }
         }
+    }
+
+    void
+    Tracking::init()
+    {
+        char* preload = std::getenv("LD_PRELOAD");
+        if (preload == nullptr) {
+            fprintf(stderr, "failed to initialize preload path\n");
+            abort();
+        }
+        boost::filesystem::path p(preload);
+        library_path_ = p.string();
+
+        // start the tracking file
+        start();
     }
 
     void
@@ -301,13 +369,49 @@ namespace memory {
         scope = s;
     }
 
+    class Log {
+    public:
+        Log() {
+            char* filename = std::getenv("MEMSCOPETRACK_LOGFILE");
+            if (filename != nullptr) {
+                logfile = std::make_unique<Outfile>(filename);
+            }
+        }
+        ~Log() {
+            // necessary so we don't try to log messages after this point
+            tracking_enabled = false;
+        }
+
+        template<typename ...Ts>
+        void print(Ts... args) {
+            if (logfile) {
+                char buf[1024];
+                snprintf(buf, 1024, args...);
+                *logfile << buf << "\n";
+            } else {
+                fprintf(stderr, args...);
+            }
+        }
+    private:
+        std::unique_ptr<Outfile> logfile;
+    };
+    std::unique_ptr<Log> log;
+
+    // initialize the library
+    void init()
+    {
+        log = std::make_unique<Log>();
+        map.init();
+        tracking_enabled = true;
+    }
+
     void track(void* addr, size_t size)
     {
         RecursionGuard r;
         if (r.recursion or !tracking_enabled)
             return; // no tracking on recursion
 
-        fprintf(stderr, "tracking addr 0x%08x with size %8u bytes in scope %s\n", addr, size, scope.c_str());
+        log->print("tracking addr 0x%08x with size %8u bytes in scope %s\n", addr, size, scope.c_str());
         if (!scope.empty()) {
             map.add(addr,scope,size);
         }
@@ -319,7 +423,7 @@ namespace memory {
         if (r.recursion or !tracking_enabled)
             return; // no tracking on recursion
 
-        fprintf(stderr, "release addr 0x%08x\n", addr);
+        log->print("release addr 0x%08x\n", addr);
         map.remove(addr);
     }
 
