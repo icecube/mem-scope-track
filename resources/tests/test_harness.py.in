@@ -10,6 +10,7 @@ build_dir = "${CMAKE_BINARY_DIR}"
 
 tracking_path = os.path.join(build_dir,'libmemscopetrack.so')
 os.environ['LD_PRELOAD'] = tracking_path
+os.environ['MEMSCOPETRACK_LOGFILE'] = 'stdout'
 
 sys.path.append(os.path.join(build_dir,'tests'))
 

@@ -1,4 +1,4 @@
-import sys
+import argparse
 import gzip
 
 import matplotlib
@@ -51,7 +51,7 @@ def plot(series, filename, log=False):
 
     plot_func = getattr(ax,'semilogy') if log else getattr(ax,'plot')
     for s in series:
-        plot_func(s['times'],s['values'],label=s['label'])
+        plot_func(s['times'],s['values'],label=s['label'],linewidth=1)
     
     # Shrink current axis's height by 20% on the bottom
     #box = ax.get_position()
@@ -78,7 +78,11 @@ def import_data(filename):
     ret = []
     t = 0
     time_series = {}
-    with gzip.open(filename, 'rb') as f:
+    if filename.endswith('.gz'):
+        file_open = gzip.open
+    else:
+        file_open = open
+    with file_open(filename, 'rb') as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -86,17 +90,24 @@ def import_data(filename):
             if line.startswith('---'): # time code in microseconds
                 if time_series:
                     ret.append((t,time_series))
-                t = float(line[3:])/1000000
+                    time_series = {}
+                t = float(line[3:])/1000000.0
                 continue
             scope,value = line.rsplit('|',1) # scope, memory in bytes
-            time_series[scope] = float(value)/1000000
+            time_series[scope] = float(value)/1000000.0
     if time_series:
         ret.append((t,time_series))
     return ret
 
 if __name__ == '__main__':
-    filename = sys.argv[1]
-    data = import_data(filename)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('filename', type=str, help='input file to process')
+    parser.add_argument('--outfile', default=None, type=str, help='outfile name')
+    parser.add_argument('--log', action='store_true', help='plot in log scale')
+    parser.add_argument('--limit', type=int, default=15, help='top # entries')
+    args = parser.parse_args()
 
-    outfile_name = filename.replace('.gz','')+'.png'
-    graph_timeline(data, outfile_name, limit=10)
+    data = import_data(args.filename)
+
+    outfile_name = args.outfile if args.outfile else args.filename.replace('.gz','')+'.png'
+    graph_timeline(data, outfile_name, log=args.log, limit=args.limit)
