@@ -20,7 +20,25 @@
 
 namespace {
 
-    class Tracking;
+    class RecursionGuard
+    {
+    public:
+        RecursionGuard() : recursion(false)
+        {
+            recursion = recursion_guard_.test_and_set(std::memory_order_acquire);
+        }
+        ~RecursionGuard() {
+            if (!recursion) {
+                recursion_guard_.clear(std::memory_order_release);
+            }
+        }
+        bool recursion;
+    private:
+        static thread_local std::atomic_flag recursion_guard_;
+    };
+    thread_local std::atomic_flag RecursionGuard::recursion_guard_ = ATOMIC_FLAG_INIT;
+    static std::atomic<bool> tracking_enabled(false);
+
 
     // create an output file
     class Outfile
@@ -47,7 +65,6 @@ namespace {
         std::unique_ptr<std::ostream> outfile_stream_;
     };
 
-
     // get a randomly named output file in the current directory
     class RandomOutfile : public Outfile
     {
@@ -60,6 +77,49 @@ namespace {
         RandomOutfile(RandomOutfile&&) = default;
     };
 
+    // log output to none, stdout, stderr, or file
+    class Log {
+    private:
+        enum class DEST { none, stdout, stderr, file };
+    public:
+        Log() : out_(DEST::none)
+        {
+            char* filename = std::getenv("MEMSCOPETRACK_LOGFILE");
+            if (filename != nullptr) {
+                if (strncmp(filename,"stdout",6) == 0) {
+                    out_ = DEST::stdout;
+                } else if (strncmp(filename,"stderr",6) == 0) {
+                    out_ = DEST::stderr;
+                } else {
+                    logfile_ = std::make_unique<Outfile>(filename);
+                    out_ = DEST::file;
+                }
+            }
+        }
+        ~Log() {
+            // necessary so we don't try to log messages after this point
+            tracking_enabled = false;
+        }
+
+        template<typename ...Ts>
+        void print(Ts... args) {
+            if (out_ == DEST::file && logfile_) {
+                char buf[1024];
+                snprintf(buf, 1024, args...);
+                *logfile_ << buf;
+            } else if (out_ == DEST::stdout) {
+                fprintf(stdout, args...);
+            } else if (out_ == DEST::stderr) {
+                fprintf(stderr, args...);
+            } // else, ignore
+        }
+    private:
+        std::unique_ptr<Outfile> logfile_;
+        DEST out_;
+    };
+
+
+    class Tracking;
 
     class TrackingThread
     {
@@ -84,30 +144,11 @@ namespace {
     };
 
 
-    class RecursionGuard
-    {
-    public:
-        RecursionGuard() : recursion(false)
-        {
-            recursion = recursion_guard_.test_and_set(std::memory_order_acquire);
-        }
-        ~RecursionGuard() {
-            if (!recursion) {
-                recursion_guard_.clear(std::memory_order_release);
-            }
-        }
-        bool recursion;
-    private:
-        static thread_local std::atomic_flag recursion_guard_;
-    };
-    thread_local std::atomic_flag RecursionGuard::recursion_guard_ = ATOMIC_FLAG_INIT;
-    static std::atomic<bool> tracking_enabled(false);
-
-
     class Tracking
     {
     public:
-        Tracking();
+        Tracking() = delete;
+        Tracking(std::shared_ptr<Log>);
         ~Tracking();
 
         // non-copyable, non-movable
@@ -115,9 +156,6 @@ namespace {
         Tracking(Tracking&&) = delete;
         Tracking& operator=(const Tracking&) = delete;
         Tracking& operator=(Tracking&&) = delete;
-
-        // external initialization
-        void init();
 
         // start tracking to file
         void start();
@@ -139,13 +177,13 @@ namespace {
         { return library_path_; }
 
     private:
+        std::shared_ptr<Log> log_;
         std::string library_path_;
         std::unordered_map<std::string, size_t> scope_map_;
         std::unordered_map<void*, std::pair<std::string, size_t>> ptr_map_;
         mutable std::mutex thread_guard_;
         std::unique_ptr<TrackingThread> tracking_thread_;
     };
-    static Tracking map;
 
 
     /** Implementation **/
@@ -224,8 +262,10 @@ namespace {
     void TrackingThread::run()
     {
         RecursionGuard r;
-        boost::filesystem::path p(tracking_.get_library_path());
-        p += "timeline.py";
+        boost::filesystem::path p = boost::filesystem::absolute(tracking_.get_library_path());
+        p = p.parent_path();
+        p /= "python";
+        p /= "timeline.py";
         std::string graph_cmd = "python " + p.string();
         {
             using namespace std::chrono_literals;
@@ -239,7 +279,7 @@ namespace {
             } else {
                 outfile = std::make_unique<Outfile>(outfile_name);
             }
-            graph_cmd += outfile->get_filename();
+            graph_cmd += " " + outfile->get_filename();
 
             auto print = [&](){
                 auto extents = tracking_.get_extents();
@@ -263,8 +303,20 @@ namespace {
     }
     
 
-    Tracking::Tracking()
-    { }
+    Tracking::Tracking(std::shared_ptr<Log> log)
+        : log_(log)
+    {
+        char* preload = std::getenv("LD_PRELOAD");
+        if (preload == nullptr) {
+            fprintf(stderr, "failed to initialize preload path\n");
+            abort();
+        }
+        boost::filesystem::path p(preload);
+        library_path_ = p.string();
+
+        // start the tracking file
+        start();
+    }
 
     Tracking::~Tracking()
     {
@@ -277,29 +329,14 @@ namespace {
                 break;
             }
         }
-        if (!empty) {
-            std::cout << "Unfreed memory:\n";
+        if (!empty && log_) {
+            log_->print("Unfreed memory:\n");
             for(auto& pair : scope_map_) {
                 if (pair.second != 0) {
-                    std::cout << "  " << pair.first << " - " << pair.second << "\n";
+                    log_->print("  %s - %u\n", pair.first.c_str(), pair.second);
                 }
             }
         }
-    }
-
-    void
-    Tracking::init()
-    {
-        char* preload = std::getenv("LD_PRELOAD");
-        if (preload == nullptr) {
-            fprintf(stderr, "failed to initialize preload path\n");
-            abort();
-        }
-        boost::filesystem::path p(preload);
-        library_path_ = p.string();
-
-        // start the tracking file
-        start();
     }
 
     void
@@ -318,16 +355,18 @@ namespace {
     Tracking::add(void* addr, std::string scope, size_t size)
     {
         std::lock_guard<std::mutex> lock(thread_guard_);
-        auto ret = ptr_map_.emplace(std::make_pair(addr, std::make_pair(scope,size)));
-        if (!ret.second) {
-            std::cerr << "duplicate memory address" << addr << "\n";
-        } else {
-            auto iter = scope_map_.find(scope);
-            if (iter == scope_map_.end()) {
+        auto iter = ptr_map_.find(addr);
+        if (iter == ptr_map_.end()) {
+            ptr_map_.emplace(std::make_pair(addr, std::make_pair(scope,size)));
+            auto iter2 = scope_map_.find(scope);
+            if (iter2 == scope_map_.end()) {
                 scope_map_.emplace(std::make_pair(scope,size));
             } else {
-                iter->second += size;
+                iter2->second += size;
             }
+        } else {
+            log_->print("duplicate memory address 0x%08x for %8u bytes in scope %s\n", addr, size, scope.c_str());
+            log_->print("    previous allocation:                %8u bytes in scope %s\n", iter->second.second, iter->second.first.c_str());
         }
     }
 
@@ -359,6 +398,7 @@ namespace {
         std::unordered_map<std::string, size_t> ret(scope_map_);
         return ret;
     }
+
 } // end anon namespace
 
 namespace memory {
@@ -368,41 +408,25 @@ namespace memory {
         RecursionGuard r;
         scope = s;
     }
+    
+    static std::shared_ptr<Log> log;
+    static std::unique_ptr<Tracking> map;
 
-    class Log {
-    public:
-        Log() {
-            char* filename = std::getenv("MEMSCOPETRACK_LOGFILE");
-            if (filename != nullptr) {
-                logfile = std::make_unique<Outfile>(filename);
-            }
-        }
-        ~Log() {
-            // necessary so we don't try to log messages after this point
-            tracking_enabled = false;
-        }
-
-        template<typename ...Ts>
-        void print(Ts... args) {
-            if (logfile) {
-                char buf[1024];
-                snprintf(buf, 1024, args...);
-                *logfile << buf << "\n";
-            } else {
-                fprintf(stderr, args...);
-            }
-        }
-    private:
-        std::unique_ptr<Outfile> logfile;
-    };
-    std::unique_ptr<Log> log;
+    // destroy
+    void destroy()
+    {
+        tracking_enabled = false;
+        map.reset();
+        log.reset();
+    }
 
     // initialize the library
     void init()
     {
-        log = std::make_unique<Log>();
-        map.init();
+        log = std::make_shared<Log>();
+        map = std::make_unique<Tracking>(log);
         tracking_enabled = true;
+        std::atexit(destroy);
     }
 
     void track(void* addr, size_t size)
@@ -413,7 +437,7 @@ namespace memory {
 
         log->print("tracking addr 0x%08x with size %8u bytes in scope %s\n", addr, size, scope.c_str());
         if (!scope.empty()) {
-            map.add(addr,scope,size);
+            map->add(addr,scope,size);
         }
     }
 
@@ -424,7 +448,7 @@ namespace memory {
             return; // no tracking on recursion
 
         log->print("release addr 0x%08x\n", addr);
-        map.remove(addr);
+        map->remove(addr);
     }
 
 } // end namespace memory
