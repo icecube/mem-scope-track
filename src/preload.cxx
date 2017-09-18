@@ -32,20 +32,25 @@ namespace overloads {
         }
     };
 
-    struct malloc_t : public base<decltype(&::malloc), malloc_t>
+    struct malloc_t : public base<void*(*)(size_t), malloc_t>
     {
         static constexpr const char* identifier = "malloc";
     } malloc;
 
-    struct free_t : public base<decltype(&::free), free_t>
+    struct free_t : public base<void(*)(void*), free_t>
     {
         static constexpr const char* identifier = "free";
     } free;
 
-    struct calloc_t : public base<decltype(&::calloc), calloc_t>
+    struct calloc_t : public base<void*(*)(size_t,size_t), calloc_t>
     {
         static constexpr const char* identifier = "calloc";
     } calloc;
+
+    struct realloc_t : public base<void*(*)(void*,size_t), realloc_t>
+    {
+        static constexpr const char* identifier = "realloc";
+    } realloc;
 
     /**
      * Dummy implementation for calloc, to get bootstrapped.
@@ -77,6 +82,7 @@ namespace overloads {
         overloads::malloc.init();
         overloads::free.init();
         overloads::calloc.init();
+        overloads::realloc.init();
 
         memory::init();
 
@@ -95,7 +101,9 @@ extern "C" {
 
         void* ptr = overloads::malloc(size);
 
-        memory::track(ptr,size);
+        if (ptr) {
+            memory::track(ptr,size);
+        }
 
         return ptr;
     }
@@ -124,5 +132,23 @@ extern "C" {
         }
 
         return ptr;
+    }
+
+    void* realloc(void* ptr, size_t size) noexcept
+    {
+        if (!overloads::realloc) {
+            overloads::init();
+        }
+        
+        void* out_ptr = overloads::realloc(ptr, size);
+
+        if (ptr && (out_ptr || size == 0)) {
+            memory::release(ptr);
+        }
+        if (out_ptr && size != 0) {
+            memory::track(out_ptr,size);
+        }
+
+        return out_ptr;
     }
 } // end extern C
